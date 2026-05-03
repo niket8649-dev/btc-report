@@ -14,28 +14,27 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 REPORTS_DIR = Path.home() / "Documents" / "btc_reports"
 
-BYBIT_BASE = "https://api.bybit.com"
+BINANCE_BASE = "https://fapi.binance.com"
+BINANCE_SPOT = "https://api.binance.com"
 
 
 # ─── 데이터 수집 ────────────────────────────────────────────────────────────────
 
 def fetch_ohlcv(timeframe: str, limit: int = 300) -> pd.DataFrame:
-    url = f"{BYBIT_BASE}/v5/market/kline"
-    interval_map = {"1d": "D", "4h": "240", "1h": "60"}
-    params = {
-        "category": "linear",
-        "symbol": "BTCUSDT",
-        "interval": interval_map[timeframe],
-        "limit": limit,
-    }
+    url = f"{BINANCE_BASE}/fapi/v1/klines"
+    interval_map = {"1d": "1d", "4h": "4h", "1h": "1h"}
+    params = {"symbol": "BTCUSDT", "interval": interval_map[timeframe], "limit": limit}
     resp = requests.get(url, params=params, timeout=10)
     resp.raise_for_status()
-    data = resp.json()["result"]["list"]
-    df = pd.DataFrame(data, columns=["timestamp", "open", "high", "low", "close", "volume", "turnover"])
-    df = df.iloc[::-1].reset_index(drop=True)  # 오름차순 정렬
+    data = resp.json()
+    df = pd.DataFrame(data, columns=[
+        "timestamp", "open", "high", "low", "close", "volume",
+        "close_time", "quote_volume", "trades", "taker_buy_base",
+        "taker_buy_quote", "ignore"
+    ])
     for col in ["open", "high", "low", "close", "volume"]:
         df[col] = df[col].astype(float)
-    df["timestamp"] = pd.to_datetime(df["timestamp"].astype(float), unit="ms")
+    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
     df.set_index("timestamp", inplace=True)
     return df
 
@@ -43,36 +42,40 @@ def fetch_ohlcv(timeframe: str, limit: int = 300) -> pd.DataFrame:
 def fetch_futures_data() -> dict:
     result = {}
 
-    # 현재가 및 펀딩비
-    r = requests.get(f"{BYBIT_BASE}/v5/market/tickers", params={"category": "linear", "symbol": "BTCUSDT"}, timeout=10).json()
-    if r.get("result", {}).get("list"):
-        t = r["result"]["list"][0]
-        result["price"] = float(t.get("lastPrice", 0))
-        result["price_change_24h"] = float(t.get("price24hPcnt", 0)) * 100
-        result["volume_24h"] = float(t.get("volume24h", 0))
-        result["funding_rate"] = float(t.get("fundingRate", 0)) * 100
-        result["oi_value"] = float(t.get("openInterestValue", 0))
+    # 현재가 및 24h 변동
+    r = requests.get(f"{BINANCE_BASE}/fapi/v1/ticker/24hr", params={"symbol": "BTCUSDT"}, timeout=10).json()
+    result["price"] = float(r.get("lastPrice", 0))
+    result["price_change_24h"] = float(r.get("priceChangePercent", 0))
+    result["volume_24h"] = float(r.get("volume", 0))
+
+    # 펀딩비
+    r = requests.get(f"{BINANCE_BASE}/fapi/v1/premiumIndex", params={"symbol": "BTCUSDT"}, timeout=10).json()
+    result["funding_rate"] = float(r.get("lastFundingRate", 0)) * 100
 
     # 펀딩비 히스토리
-    r = requests.get(f"{BYBIT_BASE}/v5/market/funding/history", params={"category": "linear", "symbol": "BTCUSDT", "limit": 10}, timeout=10).json()
-    if r.get("result", {}).get("list"):
-        rates = [float(x["fundingRate"]) * 100 for x in r["result"]["list"]]
+    r = requests.get(f"{BINANCE_BASE}/fapi/v1/fundingRate", params={"symbol": "BTCUSDT", "limit": 10}, timeout=10).json()
+    if r:
+        rates = [float(x["fundingRate"]) * 100 for x in r]
         result["avg_funding_8h"] = sum(rates) / len(rates)
-        result["funding_history"] = rates
 
-    # 미결제약정 변화
-    r = requests.get(f"{BYBIT_BASE}/v5/market/open-interest", params={"category": "linear", "symbol": "BTCUSDT", "intervalTime": "1h", "limit": 25}, timeout=10).json()
-    if r.get("result", {}).get("list"):
-        oi_list = [float(x["openInterest"]) for x in r["result"]["list"]]
-        if len(oi_list) >= 2:
-            result["oi_change_24h"] = (oi_list[0] - oi_list[-1]) / oi_list[-1] * 100
+    # 미결제약정
+    r = requests.get(f"{BINANCE_BASE}/fapi/v1/openInterest", params={"symbol": "BTCUSDT"}, timeout=10).json()
+    result["oi_value"] = float(r.get("openInterest", 0))
+
+    # OI 변화 (히스토리)
+    r = requests.get(f"{BINANCE_BASE}/futures/data/openInterestHist",
+                     params={"symbol": "BTCUSDT", "period": "1h", "limit": 25}, timeout=10).json()
+    if isinstance(r, list) and len(r) >= 2:
+        latest = float(r[-1]["sumOpenInterest"])
+        prev = float(r[0]["sumOpenInterest"])
+        result["oi_change_24h"] = (latest - prev) / prev * 100 if prev else 0
 
     # 롱/숏 비율
-    r = requests.get(f"{BYBIT_BASE}/v5/market/account-ratio", params={"category": "linear", "symbol": "BTCUSDT", "period": "1h", "limit": 1}, timeout=10).json()
-    if r.get("result", {}).get("list"):
-        ls = r["result"]["list"][0]
-        result["long_ratio"] = float(ls.get("buyRatio", 0)) * 100
-        result["short_ratio"] = float(ls.get("sellRatio", 0)) * 100
+    r = requests.get(f"{BINANCE_BASE}/futures/data/globalLongShortAccountRatio",
+                     params={"symbol": "BTCUSDT", "period": "1h", "limit": 1}, timeout=10).json()
+    if isinstance(r, list) and r:
+        result["long_ratio"] = float(r[0].get("longAccount", 0)) * 100
+        result["short_ratio"] = float(r[0].get("shortAccount", 0)) * 100
 
     return result
 
