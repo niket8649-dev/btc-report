@@ -25,11 +25,16 @@ def fetch_ohlcv(timeframe: str, limit: int = 300) -> pd.DataFrame:
         df = yf.download("BTC-USD", period="400d", interval="1d", progress=False, auto_adjust=True)
     elif timeframe == "4h":
         raw = yf.download("BTC-USD", period="60d", interval="1h", progress=False, auto_adjust=True)
+        if isinstance(raw.columns, pd.MultiIndex):
+            raw.columns = [c[0] for c in raw.columns]
         df = raw.resample("4h").agg({"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}).dropna()
     else:
         df = yf.download("BTC-USD", period="7d", interval="1h", progress=False, auto_adjust=True)
 
-    df.columns = [c.lower() if isinstance(c, str) else c[0].lower() for c in df.columns]
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = [c[0] for c in df.columns]
+
+    df.columns = [c.lower() for c in df.columns]
     df = df[["open", "high", "low", "close", "volume"]].dropna().tail(limit)
     return df
 
