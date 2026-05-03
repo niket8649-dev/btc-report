@@ -453,6 +453,10 @@ def main():
     # $10,000 포트폴리오 배분 및 별점 계산
     alloc_list = calc_allocations(ranked)
 
+    # 워치리스트 저장 (stock_alert.py 가 진입가 체크에 사용)
+    from stock_alert import save_watchlist
+    save_watchlist(ranked)
+
     print("[5/5] AI 분석 리포트 생성 중...")
     report = generate_report(alloc_list)
 
