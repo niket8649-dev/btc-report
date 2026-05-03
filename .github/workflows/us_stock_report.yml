@@ -1,0 +1,30 @@
+name: US Stock Daily Report
+
+on:
+  schedule:
+    - cron: '0 12 * * 1-5'  # 평일 오후 9시 KST (= UTC 12:00), 월~금
+  workflow_dispatch:          # 수동 실행 버튼
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 패키지 설치
+        run: pip install -r requirements.txt
+
+      - name: 추천 종목 리포트 생성 및 전송
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python us_stock_scanner.py
