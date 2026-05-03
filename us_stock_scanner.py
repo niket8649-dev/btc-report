@@ -183,9 +183,51 @@ def remove_cjk(text: str) -> str:
     return re.sub(r'[一-鿿぀-ヿ㐀-䶿豈-﫿]', '', text)
 
 
-def build_stock_summary(ranked: list) -> str:
-    lines = [f"=== 미국 주식 추천 종목 데이터 [{datetime.now().strftime('%Y-%m-%d')}] ===\n"]
-    for i, (ticker, tech, fund) in enumerate(ranked, 1):
+TOTAL_BUDGET = 10000  # 총 투자금 (달러)
+
+
+def get_stars(score: float) -> str:
+    if score >= 90:   return "⭐⭐⭐⭐⭐"
+    elif score >= 75: return "⭐⭐⭐⭐"
+    elif score >= 60: return "⭐⭐⭐"
+    elif score >= 45: return "⭐⭐"
+    else:             return "⭐"
+
+
+def calc_allocations(ranked: list) -> list:
+    """점수 비례로 $10,000 배분 계산"""
+    scores = []
+    for ticker, tech, fund in ranked:
+        s = tech['score']
+        target = fund.get('analyst_target')
+        if target and tech['price'] > 0:
+            upside = (target / tech['price'] - 1) * 100
+            s += min(upside * 0.3, 15)
+        scores.append(max(s, 1))
+
+    total = sum(scores)
+    result = []
+    for (ticker, tech, fund), s in zip(ranked, scores):
+        weight = s / total
+        alloc_usd = TOTAL_BUDGET * weight
+        entry_price = tech['price'] * 0.995  # 매수단가 = 현재가 -0.5% 근처
+        shares = alloc_usd / entry_price
+        result.append({
+            'ticker': ticker, 'tech': tech, 'fund': fund,
+            'final_score': s,
+            'weight_pct': weight * 100,
+            'alloc_usd': alloc_usd,
+            'entry_price': entry_price,
+            'shares': shares,
+            'stars': get_stars(s),
+        })
+    return result
+
+
+def build_stock_summary(alloc_list: list) -> str:
+    lines = [f"=== 미국 주식 추천 종목 데이터 [{datetime.now().strftime('%Y-%m-%d')}] ($10,000 포트폴리오) ===\n"]
+    for i, a in enumerate(alloc_list, 1):
+        tech, fund = a['tech'], a['fund']
         pe = fund.get('forward_pe') or fund.get('trailing_pe')
         rev_g = fund.get('revenue_growth')
         eps_g = fund.get('earnings_growth')
@@ -193,21 +235,21 @@ def build_stock_summary(ranked: list) -> str:
         upside = ((target / tech['price'] - 1) * 100) if target and tech['price'] else None
 
         lines.append(f"""
-[{i}위] {ticker} ({fund.get('name', ticker)})
+[{i}위] {a['ticker']} ({fund.get('name', a['ticker'])}) {a['stars']}
 섹터: {fund.get('sector', 'N/A')}
 현재가: ${tech['price']:,.2f}
-기술점수: {tech['score']}점
+추천점수: {a['final_score']:.1f}점 | 별점: {a['stars']}
+포트폴리오 배분: ${a['alloc_usd']:,.0f} ({a['weight_pct']:.1f}%) | 매수 수량: {a['shares']:.4f}주 @ ${a['entry_price']:,.2f}
 
 기술적 지표:
   EMA 9/21/50/200: ${tech['ema9']:,.2f} / ${tech['ema21']:,.2f} / ${tech['ema50']:,.2f} / {'$'+f"{tech['ema200']:,.2f}" if tech['ema200'] else 'N/A'}
   EMA 정렬: {'정배열(상승)' if tech['ema9'] > tech['ema21'] > tech['ema50'] else '혼조'}
   RSI(14): {tech['rsi']:.1f}
-  MACD: {tech['macd']:.3f} | Signal: {tech['macd_signal']:.3f} | Hist: {'양수(강세)' if tech['macd_hist'] > 0 else '음수(약세)'}
+  MACD: {tech['macd']:.3f} | Signal: {tech['macd_signal']:.3f} | {'골든크로스' if tech['macd'] > tech['macd_signal'] else '데드크로스'}
   ADX: {tech['adx']:.1f} | {'강한 추세' if tech['adx'] >= 25 else '추세 형성 중'}
-  거래량 비율: {tech['vol_ratio']:.2f}x (20일 평균 대비)
-  BB 위치: {tech['bb_pct']*100:.0f}% (0%=하단, 100%=상단)
-  1개월 수익률: {tech['ret_1m']:+.1f}%
-  3개월 수익률: {tech['ret_3m']:+.1f}%
+  거래량: {tech['vol_ratio']:.2f}x (20일 평균 대비)
+  BB 위치: {tech['bb_pct']*100:.0f}%
+  1개월 수익률: {tech['ret_1m']:+.1f}% | 3개월: {tech['ret_3m']:+.1f}%
 
 펀더멘탈:
   PER: {f'{pe:.1f}' if pe else 'N/A'}
@@ -220,14 +262,21 @@ def build_stock_summary(ranked: list) -> str:
     return '\n'.join(lines)
 
 
-def generate_report(ranked: list) -> str:
-    summary = build_stock_summary(ranked)
+def generate_report(alloc_list: list) -> str:
+    summary = build_stock_summary(alloc_list)
     today = datetime.now().strftime('%Y년 %m월 %d일')
     weekday = ['월', '화', '수', '목', '금', '토', '일'][datetime.now().weekday()]
+
+    # 포트폴리오 요약 텍스트 생성
+    portfolio_summary = "\n".join([
+        f"  {i}. {a['ticker']} {a['stars']} | ${a['alloc_usd']:,.0f} ({a['weight_pct']:.1f}%) | {a['shares']:.4f}주"
+        for i, a in enumerate(alloc_list, 1)
+    ])
 
     prompt = f"""당신은 월스트리트 출신 10년 경력의 미국 주식 전문 애널리스트입니다.
 한국 개인 투자자(토스증권 사용)를 위해 아래 종목 데이터를 분석하여 투자 리포트를 작성해주세요.
 반드시 순수한 한국어만 사용하세요. 한자, 일본어, 중국어는 절대 사용하지 마세요.
+총 투자금은 $10,000 (미국 달러)이며 종목별 배분 금액과 매수 수량이 이미 계산되어 있습니다.
 
 {summary}
 
@@ -239,27 +288,31 @@ def generate_report(ranked: list) -> str:
 
 오늘의 시장 한줄 요약: [현재 미국 시장 상황 1~2문장]
 
+💼 $10,000 포트폴리오 배분 요약
+{portfolio_summary}
+합계: $10,000
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🏆 오늘의 추천 종목 TOP 10
+🏆 종목별 상세 분석
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-(각 종목별로 아래 형식 사용)
+(각 종목별 아래 형식 사용)
 
-[순위]️ 티커 (회사명) | 섹터
-현재가: $XX.XX
-💰 추천 매수단가: $XX.XX ~ $XX.XX
+[순위] 티커 (회사명) 별점 | 추천점수: XX점
+📍 섹터: XX | 현재가: $XX.XX
+💼 배분: $X,XXX (XX%) | 매수수량: X.XXXX주 @ $XX.XX
 🎯 목표가: $XX.XX (+XX%) | 기간: X~X개월
 🛡️ 손절가: $XX.XX (-XX%)
 
-📌 투자 근거 (3가지):
-• [펀더멘탈 근거]
-• [성장 동력 / 촉매 요인]
+📌 투자 근거:
+• [펀더멘탈: 매출/이익 성장 등]
+• [성장 동력 / 핵심 촉매]
 • [섹터/매크로 관점]
 
 📈 차트 분석:
-• 추세: [EMA/MACD 기반 분석]
+• 추세: [EMA/MACD 분석]
 • 모멘텀: [RSI/거래량 분석]
-• 진입 시점: [지금 들어가야 하는 이유]
+• 진입 포인트: [지금 매수해야 하는 차트 근거]
 
 ─────────────────────────────
 
@@ -268,8 +321,8 @@ def generate_report(ranked: list) -> str:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ⚠️ 투자 유의사항
 • 본 리포트는 참고용이며 투자 손익은 본인 책임입니다.
-• 토스증권에서 거래 시 환율 변동 리스크를 고려하세요.
-• 분산 투자를 권장합니다.
+• 토스증권 거래 시 환율 변동 리스크를 고려하세요.
+• 분산 투자를 권장하며 종목당 비중을 준수하세요.
 """
 
     client = Groq(api_key=GROQ_API_KEY)
@@ -346,8 +399,11 @@ def main():
     ranked = sorted(ranked, key=final_score, reverse=True)[:10]
     print(f"  최종 추천 10개 종목: {[t for t, _, _ in ranked]}")
 
+    # $10,000 포트폴리오 배분 및 별점 계산
+    alloc_list = calc_allocations(ranked)
+
     print("[5/5] AI 분석 리포트 생성 중...")
-    report = generate_report(ranked)
+    report = generate_report(alloc_list)
 
     print("\n📨 텔레그램 전송 중...")
     send_telegram(report)
