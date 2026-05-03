@@ -1,7 +1,9 @@
 import os
+import warnings
 import requests
 import pandas as pd
 import ta
+import yfinance as yf
 from groq import Groq
 from datetime import datetime
 from pathlib import Path
@@ -13,69 +15,70 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 REPORTS_DIR = Path.home() / "Documents" / "btc_reports"
-
-BINANCE_BASE = "https://fapi.binance.com"
-BINANCE_SPOT = "https://api.binance.com"
+warnings.filterwarnings("ignore")
 
 
 # ─── 데이터 수집 ────────────────────────────────────────────────────────────────
 
 def fetch_ohlcv(timeframe: str, limit: int = 300) -> pd.DataFrame:
-    url = f"{BINANCE_BASE}/fapi/v1/klines"
-    interval_map = {"1d": "1d", "4h": "4h", "1h": "1h"}
-    params = {"symbol": "BTCUSDT", "interval": interval_map[timeframe], "limit": limit}
-    resp = requests.get(url, params=params, timeout=10)
-    resp.raise_for_status()
-    data = resp.json()
-    df = pd.DataFrame(data, columns=[
-        "timestamp", "open", "high", "low", "close", "volume",
-        "close_time", "quote_volume", "trades", "taker_buy_base",
-        "taker_buy_quote", "ignore"
-    ])
-    for col in ["open", "high", "low", "close", "volume"]:
-        df[col] = df[col].astype(float)
-    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-    df.set_index("timestamp", inplace=True)
+    if timeframe == "1d":
+        df = yf.download("BTC-USD", period="400d", interval="1d", progress=False, auto_adjust=True)
+    elif timeframe == "4h":
+        raw = yf.download("BTC-USD", period="60d", interval="1h", progress=False, auto_adjust=True)
+        df = raw.resample("4h").agg({"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}).dropna()
+    else:
+        df = yf.download("BTC-USD", period="7d", interval="1h", progress=False, auto_adjust=True)
+
+    df.columns = [c.lower() if isinstance(c, str) else c[0].lower() for c in df.columns]
+    df = df[["open", "high", "low", "close", "volume"]].dropna().tail(limit)
     return df
 
 
 def fetch_futures_data() -> dict:
     result = {}
 
-    # 현재가 및 24h 변동
-    r = requests.get(f"{BINANCE_BASE}/fapi/v1/ticker/24hr", params={"symbol": "BTCUSDT"}, timeout=10).json()
-    result["price"] = float(r.get("lastPrice", 0))
-    result["price_change_24h"] = float(r.get("priceChangePercent", 0))
-    result["volume_24h"] = float(r.get("volume", 0))
+    # CoinGecko - 현재가 및 시장 데이터 (미국 IP 차단 없음)
+    try:
+        r = requests.get(
+            "https://api.coingecko.com/api/v3/coins/bitcoin",
+            params={"localization": "false", "tickers": "false", "community_data": "false"},
+            timeout=15
+        ).json()
+        md = r.get("market_data", {})
+        result["price"] = md.get("current_price", {}).get("usd", 0)
+        result["price_change_24h"] = md.get("price_change_percentage_24h", 0)
+        result["volume_24h"] = md.get("total_volume", {}).get("usd", 0)
+    except Exception:
+        pass
 
-    # 펀딩비
-    r = requests.get(f"{BINANCE_BASE}/fapi/v1/premiumIndex", params={"symbol": "BTCUSDT"}, timeout=10).json()
-    result["funding_rate"] = float(r.get("lastFundingRate", 0)) * 100
+    # Coinglass - 펀딩비 / OI / 롱숏 (공개 API)
+    try:
+        headers = {"accept": "application/json"}
+        r = requests.get("https://open-api.coinglass.com/public/v2/funding", params={"symbol": "BTC"}, headers=headers, timeout=10).json()
+        if r.get("data"):
+            rates = [float(x.get("rate", 0)) for x in r["data"] if x.get("rate")]
+            if rates:
+                result["funding_rate"] = rates[0]
+                result["avg_funding_8h"] = sum(rates[:10]) / min(len(rates), 10)
+    except Exception:
+        pass
 
-    # 펀딩비 히스토리
-    r = requests.get(f"{BINANCE_BASE}/fapi/v1/fundingRate", params={"symbol": "BTCUSDT", "limit": 10}, timeout=10).json()
-    if r:
-        rates = [float(x["fundingRate"]) * 100 for x in r]
-        result["avg_funding_8h"] = sum(rates) / len(rates)
+    try:
+        r = requests.get("https://open-api.coinglass.com/public/v2/open_interest", params={"symbol": "BTC"}, timeout=10).json()
+        if r.get("data"):
+            total_oi = sum(float(x.get("openInterest", 0)) for x in r["data"])
+            result["oi_value"] = total_oi
+    except Exception:
+        pass
 
-    # 미결제약정
-    r = requests.get(f"{BINANCE_BASE}/fapi/v1/openInterest", params={"symbol": "BTCUSDT"}, timeout=10).json()
-    result["oi_value"] = float(r.get("openInterest", 0))
-
-    # OI 변화 (히스토리)
-    r = requests.get(f"{BINANCE_BASE}/futures/data/openInterestHist",
-                     params={"symbol": "BTCUSDT", "period": "1h", "limit": 25}, timeout=10).json()
-    if isinstance(r, list) and len(r) >= 2:
-        latest = float(r[-1]["sumOpenInterest"])
-        prev = float(r[0]["sumOpenInterest"])
-        result["oi_change_24h"] = (latest - prev) / prev * 100 if prev else 0
-
-    # 롱/숏 비율
-    r = requests.get(f"{BINANCE_BASE}/futures/data/globalLongShortAccountRatio",
-                     params={"symbol": "BTCUSDT", "period": "1h", "limit": 1}, timeout=10).json()
-    if isinstance(r, list) and r:
-        result["long_ratio"] = float(r[0].get("longAccount", 0)) * 100
-        result["short_ratio"] = float(r[0].get("shortAccount", 0)) * 100
+    try:
+        r = requests.get("https://open-api.coinglass.com/public/v2/long_short", params={"symbol": "BTC", "interval": "1h"}, timeout=10).json()
+        if r.get("data") and r["data"]:
+            latest = r["data"][0]
+            result["long_ratio"] = float(latest.get("longRatio", 0)) * 100
+            result["short_ratio"] = float(latest.get("shortRatio", 0)) * 100
+    except Exception:
+        pass
 
     return result
 
