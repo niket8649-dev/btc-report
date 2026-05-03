@@ -77,24 +77,50 @@ def fetch_batch_ohlcv(tickers: list) -> dict:
 
 def fetch_fundamentals(ticker: str) -> dict:
     try:
-        info = yf.Ticker(ticker).info
+        t = yf.Ticker(ticker)
+        info = t.info
+
+        # 애널리스트 성장 추정치
+        try:
+            growth = t.growth_estimates
+            next_year_eps_growth = float(growth.loc['+1y', ticker]) if growth is not None and '+1y' in growth.index else None
+            next5y_growth = float(growth.loc['+5y', ticker]) if growth is not None and '+5y' in growth.index else None
+        except Exception:
+            next_year_eps_growth = None
+            next5y_growth = None
+
         return {
             'name': info.get('longName', ticker),
             'sector': info.get('sector', 'N/A'),
+            'industry': info.get('industry', 'N/A'),
             'market_cap': info.get('marketCap', 0),
             'forward_pe': info.get('forwardPE', None),
             'trailing_pe': info.get('trailingPE', None),
-            'revenue_growth': info.get('revenueGrowth', None),
+            'peg_ratio': info.get('pegRatio', None),            # PEG: 성장 대비 밸류에이션
+            'price_to_sales': info.get('priceToSalesTrailing12Months', None),
+            'price_to_book': info.get('priceToBook', None),
+            'revenue_growth': info.get('revenueGrowth', None),  # 전년 대비 매출 성장률
             'earnings_growth': info.get('earningsGrowth', None),
+            'next_year_eps_growth': next_year_eps_growth,        # 내년 EPS 성장 추정
+            'next5y_growth': next5y_growth,                      # 5년 성장 추정
             'profit_margin': info.get('profitMargins', None),
+            'operating_margin': info.get('operatingMargins', None),
             'roe': info.get('returnOnEquity', None),
-            '52w_high': info.get('fiftyTwoWeekHigh', None),
-            '52w_low': info.get('fiftyTwoWeekLow', None),
+            'free_cashflow': info.get('freeCashflow', None),
+            'total_debt': info.get('totalDebt', None),
+            'debt_to_equity': info.get('debtToEquity', None),
+            'gross_margin': info.get('grossMargins', None),
             'analyst_target': info.get('targetMeanPrice', None),
+            'analyst_high': info.get('targetHighPrice', None),
+            'analyst_low': info.get('targetLowPrice', None),
+            'analyst_count': info.get('numberOfAnalystOpinions', None),
             'recommendation': info.get('recommendationKey', 'N/A'),
+            'short_ratio': info.get('shortRatio', None),         # 공매도 비율
+            'beta': info.get('beta', None),                      # 시장 민감도
+            'business_summary': (info.get('longBusinessSummary', '') or '')[:300],
         }
     except Exception:
-        return {'name': ticker, 'sector': 'N/A'}
+        return {'name': ticker, 'sector': 'N/A', 'industry': 'N/A'}
 
 
 # ─── 기술적 분석 ────────────────────────────────────────────────────────────────
@@ -251,13 +277,25 @@ def build_stock_summary(alloc_list: list) -> str:
   BB 위치: {tech['bb_pct']*100:.0f}%
   1개월 수익률: {tech['ret_1m']:+.1f}% | 3개월: {tech['ret_3m']:+.1f}%
 
-펀더멘탈:
-  PER: {f'{pe:.1f}' if pe else 'N/A'}
-  매출 성장률: {f'{rev_g*100:.1f}%' if rev_g else 'N/A'}
-  EPS 성장률: {f'{eps_g*100:.1f}%' if eps_g else 'N/A'}
+펀더멘탈 & 미래 성장성:
+  섹터/업종: {fund.get('sector','N/A')} / {fund.get('industry','N/A')}
   시가총액: {'$'+f'{fund.get("market_cap",0)/1e9:.0f}B' if fund.get('market_cap') else 'N/A'}
+  현재 PER: {f'{pe:.1f}x' if pe else 'N/A'}
+  선행 PEG: {f'{fund.get("peg_ratio"):.2f}' if fund.get("peg_ratio") else 'N/A'} (1 미만 = 저평가)
+  P/S: {f'{fund.get("price_to_sales"):.2f}' if fund.get("price_to_sales") else 'N/A'}
+  매출 성장률(TTM): {f'{rev_g*100:.1f}%' if rev_g else 'N/A'}
+  EPS 성장률(TTM): {f'{eps_g*100:.1f}%' if eps_g else 'N/A'}
+  내년 EPS 성장 추정: {f'{fund.get("next_year_eps_growth")*100:.1f}%' if fund.get("next_year_eps_growth") else 'N/A'}
+  5년 성장 추정: {f'{fund.get("next5y_growth")*100:.1f}%/년' if fund.get("next5y_growth") else 'N/A'}
+  영업이익률: {f'{fund.get("operating_margin")*100:.1f}%' if fund.get("operating_margin") else 'N/A'}
+  순이익률: {f'{fund.get("profit_margin")*100:.1f}%' if fund.get("profit_margin") else 'N/A'}
+  ROE: {f'{fund.get("roe")*100:.1f}%' if fund.get("roe") else 'N/A'}
+  부채비율: {f'{fund.get("debt_to_equity"):.1f}' if fund.get("debt_to_equity") else 'N/A'}
+  베타: {f'{fund.get("beta"):.2f}' if fund.get("beta") else 'N/A'}
   애널리스트 목표가: {'$'+f'{target:,.2f}' if target else 'N/A'}{f' (상승여력 {upside:.1f}%)' if upside else ''}
+  목표가 범위: {'$'+f'{fund.get("analyst_low"):,.2f}' if fund.get("analyst_low") else 'N/A'} ~ {'$'+f'{fund.get("analyst_high"):,.2f}' if fund.get("analyst_high") else 'N/A'} ({fund.get('analyst_count','N/A')}명)
   투자의견: {fund.get('recommendation', 'N/A').upper()}
+  사업 요약: {fund.get('business_summary', 'N/A')}
 """)
     return '\n'.join(lines)
 
@@ -274,26 +312,32 @@ def generate_report(alloc_list: list) -> str:
     ])
 
     prompt = f"""당신은 월스트리트 출신 10년 경력의 미국 주식 전문 애널리스트입니다.
-한국 개인 투자자(토스증권 사용)를 위해 아래 종목 데이터를 분석하여 투자 리포트를 작성해주세요.
+한국 개인 투자자(토스증권 사용)를 위해 1~2년 중장기 관점의 투자 리포트를 작성해주세요.
 반드시 순수한 한국어만 사용하세요. 한자, 일본어, 중국어는 절대 사용하지 마세요.
 총 투자금은 $10,000 (미국 달러)이며 종목별 배분 금액과 매수 수량이 이미 계산되어 있습니다.
+
+[분석 핵심 지침]
+1. 투자 근거는 반드시 1~2년 후 미래를 기준으로 작성 (현재 상황이 아닌 미래 성장성 중심)
+2. 각 종목의 주요 경쟁사와 비교하여 해당 종목이 왜 더 유리한지 구체적으로 설명
+3. 성장 촉매(신제품, 규제 변화, 시장 확대, AI/기술 전환 등) 명시
+4. PEG, 애널리스트 목표가 상승여력을 활용한 밸류에이션 분석 포함
 
 {summary}
 
 아래 형식으로 작성해주세요:
 
-📊 미국 주식 일일 투자 추천 리포트
+📊 미국 주식 중장기 투자 추천 리포트
 {today} ({weekday}요일)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-오늘의 시장 한줄 요약: [현재 미국 시장 상황 1~2문장]
+오늘의 시장 한줄 요약: [현재 미국 시장 상황 + 1~2년 전망 1~2문장]
 
 💼 $10,000 포트폴리오 배분 요약
 {portfolio_summary}
 합계: $10,000
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🏆 종목별 상세 분석
+🏆 종목별 상세 분석 (1~2년 중장기)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 (각 종목별 아래 형식 사용)
@@ -301,18 +345,23 @@ def generate_report(alloc_list: list) -> str:
 [순위] 티커 (회사명) 별점 | 추천점수: XX점
 📍 섹터: XX | 현재가: $XX.XX
 💼 배분: $X,XXX (XX%) | 매수수량: X.XXXX주 @ $XX.XX
-🎯 목표가: $XX.XX (+XX%) | 기간: X~X개월
+🎯 목표가: $XX.XX (+XX%) | 목표 기간: 1~2년
 🛡️ 손절가: $XX.XX (-XX%)
 
-📌 투자 근거:
-• [펀더멘탈: 매출/이익 성장 등]
-• [성장 동력 / 핵심 촉매]
-• [섹터/매크로 관점]
+📌 1~2년 투자 근거:
+• [미래 성장 스토리: 1~2년 후 어떤 이유로 주가가 상승할 것인가]
+• [핵심 성장 촉매: 신사업/신제품/시장확대/규제변화/AI전환 등]
+• [밸류에이션: PEG·목표가 기준 현재가 대비 저평가 여부]
 
-📈 차트 분석:
-• 추세: [EMA/MACD 분석]
+⚔️ 경쟁사 비교:
+• 주요 경쟁사: [경쟁사 1, 경쟁사 2]
+• 경쟁 우위: [이 종목이 경쟁사 대비 유리한 구체적 이유 2가지]
+• 리스크: [경쟁사 또는 시장에서 발생할 수 있는 위협]
+
+📈 차트 분석 (진입 타이밍):
+• 추세: [EMA/MACD 기반 현재 추세]
 • 모멘텀: [RSI/거래량 분석]
-• 진입 포인트: [지금 매수해야 하는 차트 근거]
+• 매수 전략: [지금 분할매수 vs 눌림목 대기 등 구체적 전략]
 
 ─────────────────────────────
 
@@ -320,9 +369,9 @@ def generate_report(alloc_list: list) -> str:
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ⚠️ 투자 유의사항
-• 본 리포트는 참고용이며 투자 손익은 본인 책임입니다.
+• 본 리포트는 1~2년 중장기 투자 관점이며 단기 변동성에 흔들리지 마세요.
+• 투자 손익은 본인 책임이며 분산 투자를 권장합니다.
 • 토스증권 거래 시 환율 변동 리스크를 고려하세요.
-• 분산 투자를 권장하며 종목당 비중을 준수하세요.
 """
 
     client = Groq(api_key=GROQ_API_KEY)
