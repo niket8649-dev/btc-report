@@ -1,0 +1,36 @@
+name: BTC Entry Alert
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'  # 15분마다 체크
+  workflow_dispatch:
+
+jobs:
+  alert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 패키지 설치
+        run: pip install yfinance ta pandas numpy requests python-dotenv groq
+
+      - name: 상태 파일 복원 (이전 실행)
+        uses: actions/cache@v4
+        with:
+          path: btc_alert_state.json
+          key: btc-alert-state-${{ github.run_id }}
+          restore-keys: btc-alert-state-
+
+      - name: 진입 조건 체크 및 알림
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python btc_alert.py
