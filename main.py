@@ -321,7 +321,7 @@ def generate_report(df_1d, df_4h, df_1h, fd) -> str:
 
     client = Groq(api_key=GROQ_API_KEY)
     response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="gemma2-9b-it",
         messages=[
             {
                 "role": "system",
@@ -331,7 +331,14 @@ def generate_report(df_1d, df_4h, df_1h, fd) -> str:
         ],
         max_tokens=4096,
     )
-    return response.choices[0].message.content
+    text = response.choices[0].message.content
+    return remove_non_korean_cjk(text)
+
+
+def remove_non_korean_cjk(text: str) -> str:
+    import re
+    # 한자(중국어), 히라가나, 가타카나 제거 — 한글은 유지
+    return re.sub(r'[一-鿿㐀-䶿぀-ヿ＀-￯]', '', text)
 
 
 # ─── 전송 & 저장 ─────────────────────────────────────────────────────────────────
