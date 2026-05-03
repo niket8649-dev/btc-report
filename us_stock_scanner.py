@@ -295,42 +295,77 @@ def build_stock_summary(alloc_list: list) -> str:
   애널리스트 목표가: {'$'+f'{target:,.2f}' if target else 'N/A'}{f' (상승여력 {upside:.1f}%)' if upside else ''}
   목표가 범위: {'$'+f'{fund.get("analyst_low"):,.2f}' if fund.get("analyst_low") else 'N/A'} ~ {'$'+f'{fund.get("analyst_high"):,.2f}' if fund.get("analyst_high") else 'N/A'} ({fund.get('analyst_count','N/A')}명)
   투자의견: {fund.get('recommendation', 'N/A').upper()}
-  사업 요약: {fund.get('business_summary', 'N/A')}
 """)
     return '\n'.join(lines)
 
 
+SYSTEM_MSG = "당신은 한국어로만 응답하는 미국 주식 전문 애널리스트입니다. 반드시 순수한 한국어(한글)와 영어/숫자만 사용하세요. 한자, 일본어, 중국어는 절대 사용하지 마세요."
+
+STOCK_TEMPLATE = """[순위] 티커 (회사명) 별점 | 추천점수: XX점
+📍 섹터: XX | 현재가: $XX.XX
+💼 배분: $X,XXX (XX%) | 매수수량: X.XXXX주 @ $XX.XX
+🎯 목표가: $XX.XX (+XX%) | 목표 기간: 1~2년
+🛡️ 손절가: $XX.XX (-XX%)
+
+📌 1~2년 투자 근거:
+• [미래 성장 스토리]
+• [핵심 성장 촉매]
+• [밸류에이션 분석]
+
+⚔️ 경쟁사 비교:
+• 주요 경쟁사: [경쟁사명]
+• 경쟁 우위: [구체적 이유 2가지]
+• 리스크: [주요 위협]
+
+📈 차트 분석:
+• 추세: [EMA/MACD]
+• 모멘텀: [RSI/거래량]
+• 매수 전략: [분할매수 or 눌림목 대기]
+
+─────────────────────────────"""
+
+
+def call_groq(prompt: str) -> str:
+    client = Groq(api_key=GROQ_API_KEY)
+    resp = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {"role": "system", "content": SYSTEM_MSG},
+            {"role": "user", "content": prompt},
+        ],
+        max_tokens=4096,
+    )
+    return remove_cjk(resp.choices[0].message.content)
+
+
 def generate_report(alloc_list: list) -> str:
-    summary = build_stock_summary(alloc_list)
     today = datetime.now().strftime('%Y년 %m월 %d일')
     weekday = ['월', '화', '수', '목', '금', '토', '일'][datetime.now().weekday()]
 
-    # 포트폴리오 요약 텍스트 생성
     portfolio_summary = "\n".join([
         f"  {i}. {a['ticker']} {a['stars']} | ${a['alloc_usd']:,.0f} ({a['weight_pct']:.1f}%) | {a['shares']:.4f}주"
         for i, a in enumerate(alloc_list, 1)
     ])
 
-    prompt = f"""당신은 월스트리트 출신 10년 경력의 미국 주식 전문 애널리스트입니다.
-한국 개인 투자자(토스증권 사용)를 위해 1~2년 중장기 관점의 투자 리포트를 작성해주세요.
-반드시 순수한 한국어만 사용하세요. 한자, 일본어, 중국어는 절대 사용하지 마세요.
-총 투자금은 $10,000 (미국 달러)이며 종목별 배분 금액과 매수 수량이 이미 계산되어 있습니다.
+    base_instruction = f"""당신은 월스트리트 출신 10년 경력의 미국 주식 전문 애널리스트입니다.
+한국 개인 투자자(토스증권 사용)를 위해 1~2년 중장기 관점의 투자 리포트를 작성하세요.
+[핵심 지침] 1) 투자 근거는 1~2년 후 미래 성장성 중심 2) 경쟁사 대비 우위 구체적 설명 3) 성장 촉매 명시 4) PEG/목표가 기반 밸류에이션 포함
+각 종목 형식:
+{STOCK_TEMPLATE}"""
 
-[분석 핵심 지침]
-1. 투자 근거는 반드시 1~2년 후 미래를 기준으로 작성 (현재 상황이 아닌 미래 성장성 중심)
-2. 각 종목의 주요 경쟁사와 비교하여 해당 종목이 왜 더 유리한지 구체적으로 설명
-3. 성장 촉매(신제품, 규제 변화, 시장 확대, AI/기술 전환 등) 명시
-4. PEG, 애널리스트 목표가 상승여력을 활용한 밸류에이션 분석 포함
+    # 5개씩 나눠서 2번 호출 (토큰 한도 초과 방지)
+    parts = []
+    for batch_idx, batch in enumerate([alloc_list[:5], alloc_list[5:]]):
+        if not batch:
+            continue
+        summary = build_stock_summary(batch)
+        start_rank = batch_idx * 5 + 1
 
-{summary}
-
-아래 형식으로 작성해주세요:
-
-📊 미국 주식 중장기 투자 추천 리포트
+        if batch_idx == 0:
+            header = f"""📊 미국 주식 중장기 투자 추천 리포트
 {today} ({weekday}요일)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-오늘의 시장 한줄 요약: [현재 미국 시장 상황 + 1~2년 전망 1~2문장]
+오늘의 시장 한줄 요약: [1~2문장]
 
 💼 $10,000 포트폴리오 배분 요약
 {portfolio_summary}
@@ -340,53 +375,20 @@ def generate_report(alloc_list: list) -> str:
 🏆 종목별 상세 분석 (1~2년 중장기)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-(각 종목별 아래 형식 사용)
+아래 {len(batch)}개 종목({start_rank}~{start_rank+len(batch)-1}위)을 위 형식으로 분석하세요."""
+        else:
+            header = f"아래 {len(batch)}개 종목({start_rank}~{start_rank+len(batch)-1}위)을 위 형식으로 분석하세요."
 
-[순위] 티커 (회사명) 별점 | 추천점수: XX점
-📍 섹터: XX | 현재가: $XX.XX
-💼 배분: $X,XXX (XX%) | 매수수량: X.XXXX주 @ $XX.XX
-🎯 목표가: $XX.XX (+XX%) | 목표 기간: 1~2년
-🛡️ 손절가: $XX.XX (-XX%)
+        prompt = f"{base_instruction}\n\n{header}\n\n{summary}"
+        parts.append(call_groq(prompt))
 
-📌 1~2년 투자 근거:
-• [미래 성장 스토리: 1~2년 후 어떤 이유로 주가가 상승할 것인가]
-• [핵심 성장 촉매: 신사업/신제품/시장확대/규제변화/AI전환 등]
-• [밸류에이션: PEG·목표가 기준 현재가 대비 저평가 여부]
-
-⚔️ 경쟁사 비교:
-• 주요 경쟁사: [경쟁사 1, 경쟁사 2]
-• 경쟁 우위: [이 종목이 경쟁사 대비 유리한 구체적 이유 2가지]
-• 리스크: [경쟁사 또는 시장에서 발생할 수 있는 위협]
-
-📈 차트 분석 (진입 타이밍):
-• 추세: [EMA/MACD 기반 현재 추세]
-• 모멘텀: [RSI/거래량 분석]
-• 매수 전략: [지금 분할매수 vs 눌림목 대기 등 구체적 전략]
-
-─────────────────────────────
-
-(10개 모두 작성)
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    footer = """━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ⚠️ 투자 유의사항
-• 본 리포트는 1~2년 중장기 투자 관점이며 단기 변동성에 흔들리지 마세요.
+• 본 리포트는 1~2년 중장기 관점이며 단기 변동성에 흔들리지 마세요.
 • 투자 손익은 본인 책임이며 분산 투자를 권장합니다.
-• 토스증권 거래 시 환율 변동 리스크를 고려하세요.
-"""
+• 토스증권 거래 시 환율 변동 리스크를 고려하세요."""
 
-    client = Groq(api_key=GROQ_API_KEY)
-    response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[
-            {
-                "role": "system",
-                "content": "당신은 한국어로만 응답하는 미국 주식 전문 애널리스트입니다. 반드시 순수한 한국어(한글)와 영어/숫자만 사용하세요. 한자, 일본어, 중국어는 절대 사용하지 마세요."
-            },
-            {"role": "user", "content": prompt}
-        ],
-        max_tokens=6000,
-    )
-    return remove_cjk(response.choices[0].message.content)
+    return "\n\n".join(parts) + "\n\n" + footer
 
 
 # ─── 전송 ────────────────────────────────────────────────────────────────────────
